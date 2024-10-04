@@ -15,14 +15,14 @@ body {
 .actions {
   display: flex;
   flex-direction: row;
-  justify-content: space-evenly;
-  align-items: flex-end;
+  justify-content: center;
+  align-items: center;
   width: 720px;
   height: 100px;
 }
 
 .action {
-  color: darkgray;
+  color: rgb(0, 0, 0);
   font-family: "Helvetica Neue", sans-serif;
   font-size: 20px;
   line-height: 20px;
@@ -36,11 +36,11 @@ body {
 
 .action:hover {
   background-color: darkgray;
-  color: white;
+  color: rgb(0, 0, 0);
   font-weight: 700;
 }
 
-.action[href=""] {
+.hidden {
   display: none;
 }
 
