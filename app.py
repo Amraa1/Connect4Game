@@ -1,43 +1,28 @@
-#!/usr/bin/env python
-from connect4 import Connect4, PLAYER1, PLAYER2
 import asyncio
-import itertools
-import websockets
-from websockets.asyncio.server import broadcast, serve
 import json
 import secrets
+
+from websockets.asyncio.server import broadcast, serve
+
+from connect4 import PLAYER1, PLAYER2, Connect4
 
 
 JOIN = {}
 
-async def start(websocket: websockets.WebSocketServerProtocol):
-    # Initialize a Connect Four Game, the set of Websockets connections
-    game = Connect4()
-    connected = {websocket}
-
-    # receiving moves from this game, and secret access token
-    join_key = secrets.token_urlsafe(12)
-    JOIN[join_key] = game, connected
-
-    try:
-        # send secret access token to the browser of the player 1
-        # where it will be used for building a "join" link
-
-        event = {
-            "type": "init",
-            "join": join_key,
-        }
-        await websocket.send(json.dumps(event))
+WATCH = {}
 
 
-        # Temporary - for testing
-        print("Player1 start the game", id(game))
-        # Send the first move, in case the first player already played it.
-        await replay(websocket, game)
-        await play(websocket, game, PLAYER1, connected)
-        
-    finally:
-        del JOIN[join_key]
+async def error(websocket, message):
+    """
+    Send an error message.
+
+    """
+    event = {
+        "type": "error",
+        "message": message,
+    }
+    await websocket.send(json.dumps(event))
+
 
 async def replay(websocket, game):
     """
@@ -57,68 +42,25 @@ async def replay(websocket, game):
         }
         await websocket.send(json.dumps(event))
 
-async def join(websocket, join_key):
-    event = {
-        "type": "player joined",
-        "player": PLAYER2,
-    }
-    await websocket.send(json.dumps(event))
-    # Find the connect4 game and get the set of connected websockets
-    try:
-        game, connected = JOIN[join_key]
-    except Exception as exc:
-        await error(websocket, f"Game not found: {exc}")
-
-    # Registered to receive moves from this game
-    connected.add(websocket)
-
-    try:
-        # Temporary for testing
-        print("Player2 join the game", id(game))
-        # Send the first move, in case the first player already played it.
-        await replay(websocket, game)
-        await play(websocket, game, PLAYER2, connected)
-    
-    finally:
-        connected.remove(websocket)
-
-async def error(websocket, message):
-    event = {
-        "type": "error",
-        "message": message,
-    }
-    await websocket.send(json.dumps(event))
-
-async def handler(websocket: websockets.WebSocketServerProtocol):
-    # Receive and parse tje "init" event from the UI
-    message = await websocket.recv()
-    event = json.loads(message)
-    assert event["type"] == "init"
-    
-    if "join" in event:
-        # Player 2 joins an existing game
-        join_key = event["join"]
-        await join(websocket, join_key)
-    
-    else:
-        # Player1 starts a new game
-        await start(websocket)
-
-
 
 async def play(websocket, game, player, connected):
+    """
+    Receive and process moves from a player.
+
+    """
     async for message in websocket:
-        #Parse a "play" event from the UI
+        # Parse a "play" event from the UI.
         event = json.loads(message)
         assert event["type"] == "play"
         column = event["column"]
 
         try:
-            #Play the move
+            # Play the move.
             row = game.play(player, column)
         except ValueError as exc:
-            error_message = f"Invalid move: {exc}"
-            await error(websocket, error_message)
+            # Send an "error" event if the move was illegal.
+            await error(websocket, str(exc))
+            continue
 
         # Send a "play" event to update the UI.
         event = {
@@ -128,14 +70,113 @@ async def play(websocket, game, player, connected):
             "row": row,
         }
         broadcast(connected, json.dumps(event))
-    
+
         # If move is winning, send a "win" event.
-        if (game.winner == PLAYER1 or game.winner == PLAYER2):
+        if game.winner is not None:
             event = {
-                    "type": "win",
-                    "player": game.winner,
-                }
+                "type": "win",
+                "player": game.winner,
+            }
             broadcast(connected, json.dumps(event))
+
+
+async def start(websocket):
+    """
+    Handle a connection from the first player: start a new game.
+
+    """
+    # Initialize a Connect Four game, the set of WebSocket connections
+    # receiving moves from this game, and secret access tokens.
+    game = Connect4()
+    connected = {websocket}
+
+    join_key = secrets.token_urlsafe(12)
+    JOIN[join_key] = game, connected
+
+    watch_key = secrets.token_urlsafe(12)
+    WATCH[watch_key] = game, connected
+
+    try:
+        # Send the secret access tokens to the browser of the first player,
+        # where they'll be used for building "join" and "watch" links.
+        event = {
+            "type": "init",
+            "join": join_key,
+            "watch": watch_key,
+        }
+        await websocket.send(json.dumps(event))
+        # Receive and process moves from the first player.
+        await play(websocket, game, PLAYER1, connected)
+    finally:
+        del JOIN[join_key]
+        del WATCH[watch_key]
+
+
+async def join(websocket, join_key):
+    """
+    Handle a connection from the second player: join an existing game.
+
+    """
+    # Find the Connect Four game.
+    try:
+        game, connected = JOIN[join_key]
+    except KeyError:
+        await error(websocket, "Game not found.")
+        return
+
+    # Register to receive moves from this game.
+    connected.add(websocket)
+    try:
+        # Send the first move, in case the first player already played it.
+        await replay(websocket, game)
+        # Receive and process moves from the second player.
+        await play(websocket, game, PLAYER2, connected)
+    finally:
+        connected.remove(websocket)
+
+
+async def watch(websocket, watch_key):
+    """
+    Handle a connection from a spectator: watch an existing game.
+
+    """
+    # Find the Connect Four game.
+    try:
+        game, connected = WATCH[watch_key]
+    except KeyError:
+        await error(websocket, "Game not found.")
+        return
+
+    # Register to receive moves from this game.
+    connected.add(websocket)
+    try:
+        # Send previous moves, in case the game already started.
+        await replay(websocket, game)
+        # Keep the connection open, but don't receive any messages.
+        await websocket.wait_closed()
+    finally:
+        connected.remove(websocket)
+
+
+async def handler(websocket):
+    """
+    Handle a connection and dispatch it according to who is connecting.
+
+    """
+    # Receive and parse the "init" event from the UI.
+    message = await websocket.recv()
+    event = json.loads(message)
+    assert event["type"] == "init"
+
+    if "join" in event:
+        # Second player joins an existing game.
+        await join(websocket, event["join"])
+    elif "watch" in event:
+        # Spectator watches an existing game.
+        await watch(websocket, event["watch"])
+    else:
+        # First player starts a new game.
+        await start(websocket)
 
 
 async def main():
